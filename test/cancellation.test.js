@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
 
-import { armProcessCancellation, cancelledResult } from "../dist/cancellation.js";
+import { armProcessCancellation } from "../dist/cancellation.js";
 
 // A detached shell with a grandchild, like agy plus a tool it started. Killing
 // only the shell would leave the grandchild running.
@@ -66,26 +66,4 @@ test("a child that ignores SIGTERM is killed after the grace period", async () =
   await once(child, "exit");
   assert.equal(await waitFor(() => !groupAlive(child.pid)), true);
   cancellation.dispose();
-});
-
-test("the caller's onSpawn still runs, so the server records the pid", async () => {
-  const seen = [];
-  const cancellation = armProcessCancellation({
-    signal: new AbortController().signal,
-    graceSec: 1,
-    onSpawn: async (meta) => {
-      seen.push(meta.pid);
-    },
-  });
-  await cancellation.onSpawn({ pid: 4242, processGroupId: 4242, startedAt: "t" });
-  assert.deepEqual(seen, [4242]);
-  cancellation.dispose();
-});
-
-test("the cancelled result carries the acknowledgement the server requires", () => {
-  const result = cancelledResult({ sessionId: "conv-1", resultJson: { status: "SUCCESS" } });
-  assert.equal(result.errorCode, "cancelled");
-  assert.equal(result.sessionId, "conv-1");
-  assert.equal(result.resultJson.status, "SUCCESS");
-  assert.equal(result.resultJson.executionCancellation.state, "acknowledged");
 });

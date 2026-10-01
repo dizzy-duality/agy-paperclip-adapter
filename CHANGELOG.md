@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Stop now stops agy.** The adapter opts in to Paperclip's signal-based
   cancellation (`onCancellationReady` / `ctx.signal`), terminates agy's whole
-  process group on Stop (SIGTERM, then SIGKILL after `graceSec`), and returns
+  process group on Stop (SIGTERM, then SIGKILL after `graceSec`, capped at 45 s
+  so it settles inside the server's 60 s wait), and returns
   the `executionCancellation: acknowledged` result the server requires. Before,
   the server could not reach the agy child (it lives in the adapter's own copy
   of adapter-utils), so a stopped run kept editing until its print timeout.
@@ -26,8 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which that version no longer has.
 - A resume that agy cannot honour is reported. agy 1.2.14 does not fail on an
   unknown `--conversation` id: it warns on stderr, starts a new conversation
-  and exits 0 with SUCCESS. The adapter now logs this and records
-  `resultJson.conversationReset`; the new conversation id is kept.
+  and exits 0 with SUCCESS. That run is degraded (it got the resume prompt and
+  no earlier transcript) but is not rerun, since a rerun could repeat its side
+  effects. The adapter logs it and records `resultJson.conversationReset`; the
+  new conversation id is kept.
+- The fresh retry after a lost conversation now rebuilds the full prompt
+  instead of reusing the resume-shaped one.
+- SSH targets can be stopped too (the ssh client is a local child); only
+  sandbox targets keep the host's own stop handling.
 
 ### Added
 

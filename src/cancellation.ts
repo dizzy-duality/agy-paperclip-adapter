@@ -18,8 +18,6 @@ import type { AdapterExecutionResult } from "@paperclipai/adapter-utils";
 type SpawnMeta = { pid: number; processGroupId: number | null; startedAt: string };
 type OnSpawn = (meta: SpawnMeta) => Promise<void>;
 
-type Kill = (pid: number, signal: NodeJS.Signals) => void;
-
 export interface ProcessCancellation {
   /** Pass to the process runner in place of the caller's onSpawn. */
   onSpawn: OnSpawn;
@@ -36,10 +34,11 @@ export function armProcessCancellation(input: {
   signal: AbortSignal | undefined;
   graceSec: number;
   onSpawn?: OnSpawn;
-  kill?: Kill;
 }): ProcessCancellation {
   const { signal, graceSec, onSpawn } = input;
-  const kill: Kill = input.kill ?? ((pid, sig) => process.kill(pid, sig));
+  // The server waits 60 s for the adapter to settle after Stop
+  // (waitForAdapterStop in heartbeat.ts); escalate well inside that.
+  const killAfterSec = Math.min(Math.max(0, graceSec), 45);
   let target: number | null = null;
   let escalation: NodeJS.Timeout | null = null;
   let disposed = false;
@@ -47,7 +46,7 @@ export function armProcessCancellation(input: {
   const send = (sig: NodeJS.Signals) => {
     if (target === null) return;
     try {
-      kill(target, sig);
+      process.kill(target, sig);
     } catch {
       // ESRCH: the group is already gone, which is what we want.
     }
@@ -56,7 +55,7 @@ export function armProcessCancellation(input: {
   const terminate = () => {
     if (disposed || target === null) return;
     send("SIGTERM");
-    escalation = setTimeout(() => send("SIGKILL"), Math.max(0, graceSec) * 1000);
+    escalation = setTimeout(() => send("SIGKILL"), killAfterSec * 1000);
     escalation.unref();
   };
 

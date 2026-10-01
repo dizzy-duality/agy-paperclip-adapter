@@ -83,9 +83,9 @@ function readUsage(value: unknown): { usage: UsageSummary; thinkingTokens: numbe
 }
 
 /**
- * Pull an error string out of a result payload. agy has not been observed
- * emitting a non-SUCCESS result, so this reads the plausible field names rather
- * than committing to one shape.
+ * Pull an error string out of a result payload. agy 1.2.14 reports a failed
+ * run as `{"status":"ERROR","error":"<message>"}` (observed with an invalid
+ * --model, which also exits 1); the other names are kept as fallbacks.
  */
 function readResultError(result: Record<string, unknown>): string | null {
   for (const key of ["error", "error_message", "errorMessage", "message", "detail"]) {
@@ -364,8 +364,9 @@ export function detectAgyQuotaExhausted(input: {
 export function isAgyTransientNetworkError(
   stdout?: string | null,
   stderr?: string | null,
+  resultError?: string | null,
 ): boolean {
-  return matchesAny(TRANSIENT_PATTERNS, agyDiagnosticText(stdout), stderr);
+  return matchesAny(TRANSIENT_PATTERNS, agyDiagnosticText(stdout), stderr, resultError);
 }
 
 /**
@@ -375,8 +376,9 @@ export function isAgyTransientNetworkError(
 export function isAgySessionUnrecoverableError(
   stdout?: string | null,
   stderr?: string | null,
+  resultError?: string | null,
 ): boolean {
-  return matchesAny(SESSION_UNRECOVERABLE_PATTERNS, agyDiagnosticText(stdout), stderr);
+  return matchesAny(SESSION_UNRECOVERABLE_PATTERNS, agyDiagnosticText(stdout), stderr, resultError);
 }
 
 /** Human-readable failure line for a non-success result event. */

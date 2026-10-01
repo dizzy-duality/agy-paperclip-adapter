@@ -15,18 +15,26 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const REQUESTED = "3f2b8c1e-0000-4000-8000-000000000000";
 const STARTED = "0219eb32-665a-495f-8745-a7b85e229dee";
 
+const tmpDirs = [];
 function makeTmp() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "agy-exec-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-exec-"));
+  tmpDirs.push(dir);
+  return dir;
 }
+test.after(() => {
+  for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
 
-// A fake agy: writes the given stdout/stderr files and exits, or sleeps.
-function fakeAgy(dir, { stdoutFile, stderrFile, sleepSec }) {
+// A fake agy: records each start, writes the given stdout/stderr, optionally
+// sleeps, then exits with `exitCode`.
+function fakeAgy(dir, { stdoutFile, stderrFile, stderrText, sleepSec, exitCode = 0 }) {
   const script = path.join(dir, "agy");
-  const lines = ["#!/bin/sh"];
+  const lines = ["#!/bin/sh", `echo started >> '${path.join(dir, "starts")}'`];
   if (stderrFile) lines.push(`cat '${stderrFile}' >&2`);
+  if (stderrText) lines.push(`echo '${stderrText}' >&2`);
   if (stdoutFile) lines.push(`cat '${stdoutFile}'`);
   if (sleepSec) lines.push(`sleep ${sleepSec} & wait`);
-  lines.push("exit 0");
+  lines.push(`exit ${exitCode}`);
   fs.writeFileSync(script, lines.join("\n") + "\n", { mode: 0o755 });
   return script;
 }
@@ -126,4 +134,60 @@ test("a run stopped before agy starts never spawns it", async () => {
   const result = await execute(ctx);
   assert.equal(spawned, false);
   assert.equal(result.resultJson.executionCancellation.state, "acknowledged");
+});
+
+function starts(dir) {
+  try {
+    return fs.readFileSync(path.join(dir, "starts"), "utf8").trim().split("\n").length;
+  } catch {
+    return 0;
+  }
+}
+
+test("a Stop that lands while the reset is being logged is still acknowledged", async () => {
+  const dir = makeTmp();
+  const command = fakeAgy(dir, {
+    stdoutFile: path.join(here, "fixtures/agy-1.2.14-unknown-conversation.stdout.jsonl"),
+    stderrFile: path.join(here, "fixtures/agy-1.2.14-unknown-conversation.stderr.txt"),
+  });
+  const controller = new AbortController();
+  const { ctx } = makeCtx(dir, command, {
+    signal: controller.signal,
+    onCancellationReady: async () => {},
+    runtime: {
+      sessionId: REQUESTED,
+      sessionParams: { conversationId: REQUESTED, cwd: dir },
+      sessionDisplayId: REQUESTED,
+      taskKey: null,
+    },
+    onLog: async (_stream, chunk) => {
+      if (chunk.includes("could not resume conversation")) controller.abort();
+    },
+  });
+  const result = await execute(ctx);
+  assert.equal(result.resultJson.executionCancellation?.state, "acknowledged");
+});
+
+test("a Stop during a failed resume does not start the fresh retry", async () => {
+  const dir = makeTmp();
+  // Looks like a lost conversation (so a retry would normally follow), but runs
+  // long enough to be stopped first.
+  const command = fakeAgy(dir, { stderrText: 'conversation "x" not found', sleepSec: 30, exitCode: 1 });
+  const controller = new AbortController();
+  const { ctx } = makeCtx(dir, command, {
+    signal: controller.signal,
+    onCancellationReady: async () => {},
+    onSpawn: async () => {
+      setTimeout(() => controller.abort(), 50);
+    },
+    runtime: {
+      sessionId: REQUESTED,
+      sessionParams: { conversationId: REQUESTED, cwd: dir },
+      sessionDisplayId: REQUESTED,
+      taskKey: null,
+    },
+  });
+  const result = await execute(ctx);
+  assert.equal(starts(dir), 1, "the retry must not start after a Stop");
+  assert.equal(result.resultJson.executionCancellation?.state, "acknowledged");
 });

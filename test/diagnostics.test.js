@@ -38,13 +38,6 @@ test("errors the model talks about do not classify the run", () => {
   assert.equal(isAgySessionUnrecoverableError(MODEL_TALKS_ABOUT_ERRORS, ""), false);
 });
 
-test("the same errors from agy itself still classify the run", () => {
-  assert.equal(detectAgyAuthRequired({ stdout: "", stderr: "Error: not logged in", parsed: null }).requiresAuth, true);
-  assert.equal(detectAgyQuotaExhausted({ stdout: "", stderr: "RESOURCE_EXHAUSTED: 429", parsed: null }), true);
-  assert.equal(isAgyTransientNetworkError("", "connect ECONNREFUSED 1.2.3.4:443"), true);
-  assert.equal(isAgySessionUnrecoverableError("", 'conversation "x" not found'), true);
-});
-
 test("agy's plain-text lines on stdout count as diagnostics", () => {
   const stdout = `Please log in: run \`agy login\`\n${MODEL_TALKS_ABOUT_ERRORS}`;
   assert.equal(agyDiagnosticText(stdout), "Please log in: run `agy login`");

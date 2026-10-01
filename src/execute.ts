@@ -174,9 +174,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // ── Operator Stop ─────────────────────────────────────────────────────────
   // Opt in to signal-based cancellation before any provider work, so Stop can
   // reach the agy child this adapter spawns (see cancellation.ts for why the
-  // server cannot kill it on its own). Remote targets keep the host's own
-  // handling: there is no local child here to terminate.
-  const cancelSignal = !executionTargetIsRemote ? ctx.signal : undefined;
+  // server cannot kill it on its own). Local and SSH runs both spawn a local
+  // child (agy, or the ssh client) that we can terminate. Sandbox targets have
+  // no local child; they keep the host's own stop handling.
+  const isSandboxTarget =
+    executionTarget?.kind === "remote" && executionTarget.transport === "sandbox";
+  const cancelSignal = !isSandboxTarget ? ctx.signal : undefined;
   if (cancelSignal) {
     await ctx.onCancellationReady?.();
     if (cancelSignal.aborted) return cancelledResult();
@@ -282,23 +285,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
 
-  // ── Prompt ────────────────────────────────────────────────────────────────
-  const built = await buildAgyPrompt({
-    config,
-    context,
-    env,
-    agent: { id: agent.id, companyId: agent.companyId },
-    runId,
-    conversationId,
-    onLog,
-  });
-
-  const commandNotes = [
-    ...describeAgyArgs({ cwd: effectiveExecutionCwd, sandbox, timeoutSec, skillsAddDir }),
-    ...built.notes,
-  ];
-
   const runAttempt = async (resumeConversationId: string | null) => {
+    // The prompt depends on whether this attempt resumes: a resumed
+    // conversation gets only the delta, a fresh one gets the full bootstrap.
+    // So a retry from scratch must rebuild it rather than reuse the resume one.
+    const built = await buildAgyPrompt({
+      config,
+      context,
+      env,
+      agent: { id: agent.id, companyId: agent.companyId },
+      runId,
+      conversationId: resumeConversationId,
+      onLog,
+    });
+    const commandNotes = [
+      ...describeAgyArgs({ cwd: effectiveExecutionCwd, sandbox, timeoutSec, skillsAddDir }),
+      ...built.notes,
+    ];
+
     const args = buildAgyArgs({
       prompt: built.prompt,
       conversationId: resumeConversationId,
@@ -355,9 +359,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // agy 1.2.14 does not fail on a --conversation id it no longer has: it warns
   // `conversation "<id>" not found` on stderr, starts a new conversation and
   // exits 0 with SUCCESS. The only reliable signal is a result whose
-  // conversation_id differs from the one requested. The run itself is valid,
-  // and its new id is stored for the next heartbeat, but the agent worked
-  // without its earlier transcript, which the operator should be able to see.
+  // conversation_id differs from the one requested. That run was degraded:
+  // its prompt was built for a resume (no bootstrap prompt, only the wake
+  // delta plus the instructions file) and it had no earlier transcript. It is
+  // not retried, because it already did its work and a rerun could repeat
+  // side effects (comments, commits). It is reported instead, and the new
+  // conversation id is stored so the next heartbeat starts from it.
   const conversationReset = (attempt: Attempt, isRetry: boolean): boolean =>
     !isRetry &&
     conversationId !== null &&
@@ -376,7 +383,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       stderr: proc.stderr,
       parsed,
     });
-    const networkUnavailable = isAgyTransientNetworkError(proc.stdout, proc.stderr);
+    const networkUnavailable = isAgyTransientNetworkError(proc.stdout, proc.stderr, parsed.errorMessage);
 
     const resolvedModel = model && model !== DEFAULT_AGY_MODEL ? model : null;
     const provider = inferModelProvider(resolvedModel ?? "gemini");
@@ -491,8 +498,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (conversationReset(initial, false)) {
     await onLog(
       "stdout",
-      `[paperclip] agy could not resume conversation "${conversationId}" and started a new one ("${initial.parsed.conversationId}"); this run had no earlier transcript.\n`,
+      `[paperclip] agy could not resume conversation "${conversationId}" and started a new one ("${initial.parsed.conversationId}"); this run had no earlier transcript and only the resume prompt.\n`,
     );
+    // A Stop that landed during the log write above still needs acknowledging.
+    if (cancelSignal?.aborted) return cancelledResult(toResult(initial, false));
   }
 
   // A resume that failed because the conversation is gone is worth exactly one
@@ -501,7 +510,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     conversationId &&
     !initial.proc.timedOut &&
     (initial.proc.exitCode ?? 0) !== 0 &&
-    isAgySessionUnrecoverableError(initial.proc.stdout, initial.proc.stderr)
+    isAgySessionUnrecoverableError(initial.proc.stdout, initial.proc.stderr, initial.parsed.errorMessage)
   ) {
     await onLog(
       "stdout",
