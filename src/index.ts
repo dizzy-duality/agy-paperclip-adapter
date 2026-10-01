@@ -13,7 +13,7 @@ import { agentConfigurationDoc } from "./agent-configuration-doc.js";
 import { getConfigSchema } from "./config-schema.js";
 import { ADAPTER_LABEL, ADAPTER_TYPE } from "./constants.js";
 import { execute } from "./execute.js";
-import { DEFAULT_AGY_MODEL, listAgyModels, modelProfiles, models, refreshAgyModels } from "./models.js";
+import { DEFAULT_AGY_MODEL, listAgyModels, models, refreshAgyModels } from "./models.js";
 import { sessionCodec, sessionManagement } from "./session.js";
 import { listSkills, syncSkills } from "./skills.js";
 import { testEnvironment } from "./test-environment.js";
@@ -43,7 +43,6 @@ export function createServerAdapter(): ServerAdapterModule {
     models,
     listModels: () => listAgyModels(),
     refreshModels: () => refreshAgyModels(),
-    modelProfiles,
     getConfigSchema,
     getRuntimeCommandSpec,
     agentConfigurationDoc,
@@ -63,7 +62,7 @@ export function createServerAdapter(): ServerAdapterModule {
 
 export default createServerAdapter;
 
-export { ADAPTER_LABEL, ADAPTER_TYPE, DEFAULT_AGY_MODEL, agentConfigurationDoc, models, modelProfiles };
+export { ADAPTER_LABEL, ADAPTER_TYPE, DEFAULT_AGY_MODEL, agentConfigurationDoc, models };
 export { execute } from "./execute.js";
 export { testEnvironment } from "./test-environment.js";
 export { getConfigSchema } from "./config-schema.js";
