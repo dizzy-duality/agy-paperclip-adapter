@@ -62,6 +62,15 @@ import { sessionCodec } from "./session.js";
 import { describeRunSkillSync, resolveAgySkillRoot, syncSkillsForRun } from "./skills.js";
 
 const DEFAULT_TIMEOUT_SEC = 3600;
+
+/** Executable or trusted config under ~/.gemini; kept read-only in the sandbox. */
+export const AGY_STATE_READONLY_SUBPATHS = [
+  "config", // mcp_config.json, global skills, config.json
+  "antigravity-cli/bin",
+  "antigravity-cli/builtin",
+  "antigravity-cli/updater",
+  "antigravity-cli/settings.json",
+] as const;
 const DEFAULT_GRACE_SEC = 15;
 
 function firstNonEmptyLine(text: string): string {
@@ -320,6 +329,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           filesystemScope,
           managedPaths: [
             { path: agyStateDir, access: "rw" as const },
+            // agy needs ~/.gemini writable (OAuth token refresh, conversations),
+            // but the parts that later agy runs EXECUTE or trust must not be
+            // writable from inside the sandbox, or a confined agent could plant an
+            // MCP server, a global skill or a binary that the next unconfined run
+            // executes. Read-only binds of these subpaths override the rw mount
+            // above (bwrap applies mounts in order). Verified on agy 1.2.14 that a
+            // run, including one in a new workspace, writes none of them.
+            ...AGY_STATE_READONLY_SUBPATHS.map((sub) => ({
+              path: path.join(agyStateDir, sub),
+              access: "ro" as const,
+            })),
             ...(skillsAddDir ? [{ path: skillsAddDir, access: "ro" as const }] : []),
             // Skill links point outside the workspace (company skill sources, the
             // catalog cache). Inside the sandbox those targets would be missing, the

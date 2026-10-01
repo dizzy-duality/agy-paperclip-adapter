@@ -22,9 +22,9 @@ Core fields:
 - instructionsFilePath (string, optional): absolute path to a markdown instructions file prepended to the run prompt
 - promptTemplate (string, optional): overrides the default Paperclip heartbeat prompt
 - bootstrapPromptTemplate (string, optional): extra prompt text injected only on the first run of a conversation
-- filesystemScope (string, optional): "workspace" confines agy with Paperclip's Bubblewrap sandbox (same contract as claude_local): only the workspace, agy's state dir (~/.gemini, read-write) and the synced skill root (read-only) are visible; the rest of $HOME is hidden. Requires bwrap on the host.
+- filesystemScope (string, optional): "workspace" confines agy with Paperclip's Bubblewrap sandbox (same contract as claude_local): only the workspace, agy's state dir (~/.gemini), the synced skill root and resolved skill link targets (read-only) are visible; the rest of $HOME is hidden. Within ~/.gemini, config/, antigravity-cli/bin, builtin, updater and settings.json are read-only, but other agents' conversations and history on the same host stay readable. Requires bwrap that can create mount namespaces; in a default unprivileged container (e.g. a k3s pod) bwrap fails with "Failed to make / slave".
 - filesystemExtraPaths (array, optional): extra absolute host paths inside the sandbox; strings are read-only, objects use { path, access: "ro" | "rw" }.
-- networkScope / networkAllowlist (optional): same as claude_local ("deny" or "allowlist" through Paperclip's proxy).
+- networkScope / networkAllowlist (optional): same as claude_local, through Paperclip's proxy. agy needs Google's APIs on every run, so "deny" makes every run fail; with "allowlist", include daily-cloudcode-pa.googleapis.com (agy's backend, seen in live traffic) and, from the agy 1.2.14 binary, cloudcode-pa.googleapis.com, oauth2.googleapis.com (token refresh) and www.googleapis.com, plus whatever the agent's work needs.
 - sandbox (boolean, optional): pass agy --sandbox (default false — Paperclip owns the execution boundary)
 - disableSlashCommands (boolean, optional): pass agy --disable-slash-commands
 - extraArgs (string[], optional): additional agy arguments

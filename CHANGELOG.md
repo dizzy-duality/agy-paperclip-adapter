@@ -7,21 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2026-10-01
 
-Merges evgemar/agy-paperclip-adapter#2 (by To0wnn) on top of 0.3.0.
+Merges the sandbox part of evgemar/agy-paperclip-adapter#2 (by To0wnn) on top
+of 0.3.0.
 
 ### Added
 
 - `filesystemScope` / `networkScope`: run agy in Paperclip's Bubblewrap sandbox
-  (same contract as `claude_local`). Only the workspace, `~/.gemini` (rw) and
-  the skill root plus resolved skill link targets (ro) are visible. Off by
-  default. Needs a host where unprivileged bwrap works; in a default
-  unprivileged container it fails ("Failed to make / slave").
+  (same contract as `claude_local`). Only the workspace, `~/.gemini`, the skill
+  root and resolved skill link targets (read-only) are visible. Off by default.
+- Inside the sandbox, the parts of `~/.gemini` that later agy runs execute or
+  trust (`config/`, `antigravity-cli/{bin,builtin,updater,settings.json}`) are
+  read-only, so a confined agent cannot plant an MCP server, skill or binary
+  for the next unconfined run. Other agents' conversations on the same host
+  remain readable.
+- Config docs: `networkScope: "deny"` breaks every agy run; the Google hosts
+  an allowlist needs are listed. bwrap needs mount namespaces, which a default
+  unprivileged container (e.g. a k3s pod) does not allow.
 
-### Fixed
+### Not included
 
-- Company skills now load: agy only loads a skill whose directory name equals
-  its SKILL.md `name`, and Paperclip's runtime names carry a `--<hash>` suffix.
-  Links are named without the suffix unless two would collide.
+- #2's skill rename (drop the `--<hash>` suffix so the link matches SKILL.md's
+  `name`). Real agy 1.2.14 probes showed agy loads skills regardless of the
+  directory name, and bare names can collide across companies in
+  `skillsScope: "global"`, where an existing link is silently kept.
 
 ## [0.3.0] - 2026-10-01
 
