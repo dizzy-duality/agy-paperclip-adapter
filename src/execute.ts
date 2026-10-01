@@ -31,6 +31,13 @@ import {
   stringifyPaperclipWakePayload,
 } from "@paperclipai/adapter-utils/server-utils";
 import { buildAdapterEnvConfig } from "@paperclipai/adapter-utils";
+import {
+  parseLocalProcessFilesystemScope,
+  parseLocalProcessNetworkAllowlist,
+  parseLocalProcessNetworkScope,
+  parseLocalProcessSandboxExtraPaths,
+} from "@paperclipai/adapter-utils/local-process-sandbox";
+import os from "node:os";
 import type {
   AdapterExecutionContext,
   AdapterExecutionResult,
@@ -55,6 +62,15 @@ import { sessionCodec } from "./session.js";
 import { describeRunSkillSync, resolveAgySkillRoot, syncSkillsForRun } from "./skills.js";
 
 const DEFAULT_TIMEOUT_SEC = 3600;
+
+/** Executable or trusted config under ~/.gemini; kept read-only in the sandbox. */
+export const AGY_STATE_READONLY_SUBPATHS = [
+  "config", // mcp_config.json, global skills, config.json
+  "antigravity-cli/bin",
+  "antigravity-cli/builtin",
+  "antigravity-cli/updater",
+  "antigravity-cli/settings.json",
+] as const;
 const DEFAULT_GRACE_SEC = 15;
 
 function firstNonEmptyLine(text: string): string {
@@ -130,6 +146,19 @@ function applyConfiguredEnv(env: Record<string, string>, config: Record<string, 
     if (typeof rawValue === "object") continue;
     env[key] = String(rawValue);
   }
+}
+
+
+async function resolveSkillLinkTargets(skillsAddDir: string | null): Promise<string[]> {
+  if (!skillsAddDir) return [];
+  const skillsDir = path.join(skillsAddDir, ".agents", "skills");
+  const names = await fs.readdir(skillsDir).catch(() => [] as string[]);
+  const targets = new Set<string>();
+  for (const name of names) {
+    const real = await fs.realpath(path.join(skillsDir, name)).catch(() => null);
+    if (real && !real.startsWith(skillsAddDir + path.sep)) targets.add(real);
+  }
+  return [...targets].sort();
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
@@ -285,6 +314,56 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     );
   }
 
+  // ── Paperclip local-process sandbox (filesystemScope / networkScope) ──────
+  // Same contract as claude_local: with filesystemScope="workspace" agy runs in a
+  // Bubblewrap root that only exposes the workspace, agy's own state dir (~/.gemini:
+  // OAuth token, conversations, global skills) and the synced skill root. Everything
+  // else under $HOME (Paperclip board keys, server env files, other repos) is hidden.
+  const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
+  const networkScope = parseLocalProcessNetworkScope(config.networkScope);
+  const agyStateDir = path.join(os.homedir(), ".gemini");
+  const localProcessSandbox =
+    (filesystemScope || networkScope) && !executionTargetIsRemote
+      ? {
+          workspaceDir: effectiveExecutionCwd,
+          filesystemScope,
+          managedPaths: [
+            { path: agyStateDir, access: "rw" as const },
+            // agy needs ~/.gemini writable (OAuth token refresh, conversations),
+            // but the parts that later agy runs EXECUTE or trust must not be
+            // writable from inside the sandbox, or a confined agent could plant an
+            // MCP server, a global skill or a binary that the next unconfined run
+            // executes. Read-only binds of these subpaths override the rw mount
+            // above (bwrap applies mounts in order). Verified on agy 1.2.14 that a
+            // run, including one in a new workspace, writes none of them.
+            ...AGY_STATE_READONLY_SUBPATHS.map((sub) => ({
+              path: path.join(agyStateDir, sub),
+              access: "ro" as const,
+            })),
+            ...(skillsAddDir ? [{ path: skillsAddDir, access: "ro" as const }] : []),
+            // Skill links point outside the workspace (company skill sources, the
+            // catalog cache). Inside the sandbox those targets would be missing, the
+            // links dangle, and agy silently skips the skill — so expose each
+            // resolved link target read-only.
+            ...(await resolveSkillLinkTargets(skillsAddDir)).map((target) => ({ path: target, access: "ro" as const })),
+          ],
+          extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
+          homeDir: filesystemScope ? os.homedir() : null,
+          networkScope,
+          networkAllowlist: parseLocalProcessNetworkAllowlist(config.networkAllowlist),
+          networkTrustedUrls: [env.PAPERCLIP_API_URL].filter(
+            (value): value is string => typeof value === "string" && value.length > 0,
+          ),
+          command: asString(config.filesystemSandboxCommand, "bwrap"),
+        }
+      : null;
+  if (localProcessSandbox) {
+    const scopes = [filesystemScope ? "workspace filesystem" : null, networkScope ? `${networkScope} network` : null]
+      .filter(Boolean)
+      .join(" + ");
+    await onLog("stdout", `[paperclip] Confining agy with ${scopes} scope.\n`);
+  }
+
   const runAttempt = async (resumeConversationId: string | null) => {
     // The prompt depends on whether this attempt resumes: a resumed
     // conversation gets only the delta, a fresh one gets the full bootstrap.
@@ -346,6 +425,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         onSpawn: cancellation.onSpawn,
         onLog,
         onRuntimeProgress: ctx.onRuntimeProgress,
+        // Under bwrap (--new-session --unshare-pid --die-with-parent) agy sits in
+        // its own session, so the Stop kill reaches bwrap's process group, and
+        // bwrap's exit takes the whole PID namespace, agy included, with it.
+        localProcessSandbox,
       });
     } finally {
       cancellation.dispose();
