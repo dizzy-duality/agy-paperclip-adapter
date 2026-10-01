@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-01
+
+Merges evgemar/agy-paperclip-adapter#2 (by To0wnn) on top of 0.3.0.
+
+### Added
+
+- `filesystemScope` / `networkScope`: run agy in Paperclip's Bubblewrap sandbox
+  (same contract as `claude_local`). Only the workspace, `~/.gemini` (rw) and
+  the skill root plus resolved skill link targets (ro) are visible. Off by
+  default. Needs a host where unprivileged bwrap works; in a default
+  unprivileged container it fails ("Failed to make / slave").
+
+### Fixed
+
+- Company skills now load: agy only loads a skill whose directory name equals
+  its SKILL.md `name`, and Paperclip's runtime names carry a `--<hash>` suffix.
+  Links are named without the suffix unless two would collide.
+
 ## [0.3.0] - 2026-10-01
 
 ### Fixed
