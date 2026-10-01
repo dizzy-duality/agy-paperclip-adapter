@@ -10,7 +10,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-import type { AdapterModel, AdapterModelProfileDefinition } from "@paperclipai/adapter-utils";
+import type { AdapterModel } from "@paperclipai/adapter-utils";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,16 +34,6 @@ export const models: AdapterModel[] = [
   { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 (Thinking)" },
   { id: "claude-opus-4-6-thinking", label: "Claude Opus 4.6 (Thinking)" },
   { id: "gpt-oss-120b-medium", label: "GPT-OSS 120B (Medium)" },
-];
-
-export const modelProfiles: AdapterModelProfileDefinition[] = [
-  {
-    key: "cheap",
-    label: "Gemini 3.8 Flash (Low)",
-    description: "Cheapest Antigravity lane — use for mechanical or high-volume subtasks.",
-    adapterConfig: { model: "gemini-3.8-flash-low" },
-    source: "adapter_default",
-  },
 ];
 
 /** Parse the tab-separated `agy models` table, ignoring the progress banner. */

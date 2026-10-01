@@ -39,6 +39,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { buildAgyArgs, describeAgyArgs } from "./args.js";
+import { armProcessCancellation, cancelledResult } from "./cancellation.js";
 import { ADAPTER_TYPE } from "./constants.js";
 import { inferModelProvider, DEFAULT_AGY_MODEL } from "./models.js";
 import {
@@ -168,6 +169,17 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
+  }
+
+  // ── Operator Stop ─────────────────────────────────────────────────────────
+  // Opt in to signal-based cancellation before any provider work, so Stop can
+  // reach the agy child this adapter spawns (see cancellation.ts for why the
+  // server cannot kill it on its own). Remote targets keep the host's own
+  // handling: there is no local child here to terminate.
+  const cancelSignal = !executionTargetIsRemote ? ctx.signal : undefined;
+  if (cancelSignal) {
+    await ctx.onCancellationReady?.();
+    if (cancelSignal.aborted) return cancelledResult();
   }
 
   // ── Skills ────────────────────────────────────────────────────────────────
@@ -319,20 +331,38 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
-    const proc = await runAdapterExecutionTargetProcess(runId, executionTarget, command, args, {
-      cwd,
-      env,
-      timeoutSec,
-      graceSec,
-      onSpawn,
-      onLog,
-      onRuntimeProgress: ctx.onRuntimeProgress,
-    });
+    const cancellation = armProcessCancellation({ signal: cancelSignal, graceSec, onSpawn });
+    let proc: Awaited<ReturnType<typeof runAdapterExecutionTargetProcess>>;
+    try {
+      proc = await runAdapterExecutionTargetProcess(runId, executionTarget, command, args, {
+        cwd,
+        env,
+        timeoutSec,
+        graceSec,
+        onSpawn: cancellation.onSpawn,
+        onLog,
+        onRuntimeProgress: ctx.onRuntimeProgress,
+      });
+    } finally {
+      cancellation.dispose();
+    }
 
     return { proc, parsed: parseAgyJsonl(proc.stdout) };
   };
 
   type Attempt = Awaited<ReturnType<typeof runAttempt>>;
+
+  // agy 1.2.14 does not fail on a --conversation id it no longer has: it warns
+  // `conversation "<id>" not found` on stderr, starts a new conversation and
+  // exits 0 with SUCCESS. The only reliable signal is a result whose
+  // conversation_id differs from the one requested. The run itself is valid,
+  // and its new id is stored for the next heartbeat, but the agent worked
+  // without its earlier transcript, which the operator should be able to see.
+  const conversationReset = (attempt: Attempt, isRetry: boolean): boolean =>
+    !isRetry &&
+    conversationId !== null &&
+    attempt.parsed.conversationId !== null &&
+    attempt.parsed.conversationId !== conversationId;
 
   const toResult = (attempt: Attempt, isRetry: boolean): AdapterExecutionResult => {
     const { proc, parsed } = attempt;
@@ -412,9 +442,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const missingResult = parsed.resultEvent === null;
     const failed = exitFailed || statusFailed || missingResult;
 
+    // `||`, not `??`: firstNonEmptyLine returns "" for an empty stderr, which
+    // must fall through to the generic message rather than end the chain.
     const errorMessage = failed
-      ? parsed.errorMessage ??
-        firstNonEmptyLine(proc.stderr) ??
+      ? parsed.errorMessage ||
+        firstNonEmptyLine(proc.stderr) ||
         (missingResult
           ? "agy exited without emitting a result event; the stream-json output was truncated."
           : `agy exited with code ${proc.exitCode ?? -1}`)
@@ -438,7 +470,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       biller: "google",
       model: resolvedModel,
       billingType: "subscription",
-      resultJson: buildResultJson(parsed, proc.stdout, proc.stderr),
+      resultJson: {
+        ...buildResultJson(parsed, proc.stdout, proc.stderr),
+        ...(conversationReset(attempt, isRetry)
+          ? { conversationReset: { requested: conversationId, started: parsed.conversationId } }
+          : {}),
+      },
       summary: parsed.summary,
       // Drop a conversation id that could not be recovered so the next
       // heartbeat starts clean instead of retrying a dead handle.
@@ -447,6 +484,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   };
 
   const initial = await runAttempt(conversationId);
+  // The runner returns only after the child has exited, so a Stop that landed
+  // during the run is now verified and can be acknowledged.
+  if (cancelSignal?.aborted) return cancelledResult(toResult(initial, false));
+
+  if (conversationReset(initial, false)) {
+    await onLog(
+      "stdout",
+      `[paperclip] agy could not resume conversation "${conversationId}" and started a new one ("${initial.parsed.conversationId}"); this run had no earlier transcript.\n`,
+    );
+  }
 
   // A resume that failed because the conversation is gone is worth exactly one
   // retry from scratch; anything else is a real failure to report.
@@ -461,6 +508,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       `[paperclip] agy conversation "${conversationId}" is unavailable; retrying with a fresh conversation.\n`,
     );
     const retry = await runAttempt(null);
+    if (cancelSignal?.aborted) return cancelledResult(toResult(retry, true));
     return toResult(retry, true);
   }
 

@@ -301,6 +301,32 @@ const SESSION_UNRECOVERABLE_PATTERNS: RegExp[] = [
   /failed\s+to\s+(?:load|resume|open)\s+conversation/i,
 ];
 
+/**
+ * The part of agy's stdout that is agy talking, not the model: every line that
+ * is not a stream-json event. Model replies, thinking and tool output all
+ * arrive inside JSON events, so an agent that writes "HTTP 429" or
+ * "unauthorized" in its answer must not turn a run into a quota or login
+ * failure. agy's own plain-text diagnostics, which do mean something, are the
+ * lines that remain.
+ */
+export function agyDiagnosticText(stdout: string | null | undefined): string {
+  if (!stdout) return "";
+  return stdout
+    .split(/\r?\n/)
+    .filter((line) => {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) return false;
+      if (!trimmed.startsWith("{")) return true;
+      try {
+        JSON.parse(trimmed);
+        return false;
+      } catch {
+        return true;
+      }
+    })
+    .join("\n");
+}
+
 function matchesAny(patterns: RegExp[], ...texts: Array<string | null | undefined>): boolean {
   for (const text of texts) {
     if (!text) continue;
@@ -322,7 +348,7 @@ export function detectAgyAuthRequired(input: {
 }): { requiresAuth: boolean } {
   const resultError = input.parsed?.errorMessage ?? null;
   return {
-    requiresAuth: matchesAny(AUTH_PATTERNS, input.stdout, input.stderr, resultError),
+    requiresAuth: matchesAny(AUTH_PATTERNS, agyDiagnosticText(input.stdout), input.stderr, resultError),
   };
 }
 
@@ -332,14 +358,14 @@ export function detectAgyQuotaExhausted(input: {
   parsed?: AgyParsedStream | null;
 }): boolean {
   const resultError = input.parsed?.errorMessage ?? null;
-  return matchesAny(QUOTA_PATTERNS, input.stdout, input.stderr, resultError);
+  return matchesAny(QUOTA_PATTERNS, agyDiagnosticText(input.stdout), input.stderr, resultError);
 }
 
 export function isAgyTransientNetworkError(
   stdout?: string | null,
   stderr?: string | null,
 ): boolean {
-  return matchesAny(TRANSIENT_PATTERNS, stdout, stderr);
+  return matchesAny(TRANSIENT_PATTERNS, agyDiagnosticText(stdout), stderr);
 }
 
 /**
@@ -350,7 +376,7 @@ export function isAgySessionUnrecoverableError(
   stdout?: string | null,
   stderr?: string | null,
 ): boolean {
-  return matchesAny(SESSION_UNRECOVERABLE_PATTERNS, stdout, stderr);
+  return matchesAny(SESSION_UNRECOVERABLE_PATTERNS, agyDiagnosticText(stdout), stderr);
 }
 
 /** Human-readable failure line for a non-success result event. */
