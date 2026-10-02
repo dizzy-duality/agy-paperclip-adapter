@@ -124,9 +124,33 @@ needs no extra flag, but every agy agent on the host then sees the same skills, 
 > invisible — no error, no warning, just a model that has never heard of them. This
 > adapter never targets it, and a unit test asserts no configuration can resolve to it.
 
-Remote execution targets are not covered: the skill root is a path on the Paperclip
-host, so `execute()` logs a note and skips the extra `--add-dir` rather than pointing agy
-at a directory that does not exist in the target.
+On a remote execution target (SSH host or sandbox pod), the synced agent-scope skill
+root travels with the run and `--add-dir` points at its copy in the target.
+`skillsScope: "global"` skills are not delivered there.
+
+## Remote execution (SSH hosts and sandbox pods)
+
+`execute()` follows the first-party `gemini_local` adapter on a remote target:
+
+- the workspace is synced to the target before the run and restored afterwards, so
+  the agent's changes come back;
+- on a **sandbox** target (for example Paperclip's Kubernetes plugin), HOME is the
+  per-run runtime root, and the host's `~/.gemini/antigravity-cli/antigravity-oauth-token`
+  is copied there with mode 0600. Only that file travels: agy 1.2.14 runs from an
+  otherwise empty HOME, refreshes the access token in its copy, and keeps the refresh
+  token, so the host's login stays valid. Other agents' conversations and the
+  operator's agy config stay on the host. An SSH host keeps its own HOME and login;
+- the Paperclip API bridge starts when the target asks for one;
+- a conversation resumes only in the same execution identity; a new pod starts a
+  fresh conversation with the full bootstrap prompt.
+
+Requirements outside this adapter:
+
+- the target must have `agy` (set `command` to its path there, typically `agy`);
+- Paperclip 2026.916.1 allows sandbox environments only for its built-in adapters
+  (`REMOTE_MANAGED_ADAPTERS` in `@paperclipai/shared`), so `agy_local` needs that list
+  extended on the server. [paperclip-k3s](https://github.com/dizzy-duality/paperclip-k3s)
+  does this with a patched server image.
 
 ## Behaviour notes
 

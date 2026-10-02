@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-02
+
+### Added
+
+- Remote execution targets, following `gemini_local`: workspace sync and
+  restore, the Paperclip API bridge, and on sandbox targets a managed HOME
+  that receives only the host's agy login file (mode 0600). Agent-scope
+  skills are delivered to the target. Tested end to end against a sandbox
+  target whose runner executes locally, through the real adapter-utils sync.
+
+### Changed
+
+- Agent-scope skills are synced on the host for remote runs too (previously
+  skipped with a note).
+
 ## [0.4.0] - 2026-10-01
 
 Merges the sandbox part of evgemar/agy-paperclip-adapter#2 (by To0wnn) on top
