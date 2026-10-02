@@ -13,8 +13,10 @@ import { AGY_STATE_READONLY_SUBPATHS, execute } from "../dist/execute.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(here, "fixtures/agy-1.2.14-unknown-conversation.stdout.jsonl");
+// Paperclip supports filesystem/network scopes only on Linux (bwrap).
+const linuxOnly = { skip: process.platform !== "linux" && "local process scopes are Linux-only in Paperclip" };
 
-test("filesystemScope=workspace mounts ~/.gemini rw with its executable parts read-only", async (t) => {
+test("filesystemScope=workspace mounts ~/.gemini rw with its executable parts read-only", linuxOnly, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-sandbox-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, "home");
