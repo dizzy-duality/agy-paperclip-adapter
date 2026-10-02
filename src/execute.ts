@@ -299,7 +299,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       target: executionTarget,
       localCwd: cwd,
       executionCwd: effectiveExecutionCwd,
-      localSkillsHome: skillsAddDir ? skillRoot.skillsHome : null,
+      localSkillsRoot: skillsAddDir,
       env,
       timeoutSec,
       graceSec,
@@ -326,11 +326,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     skillsAddDir = remote.skillsAddDir;
   }
   const runtimeTarget = remote ? remote.runtimeTarget : executionTarget;
+  let result: AdapterExecutionResult;
   try {
-    return await runAgy();
-  } finally {
-    await remote?.finish();
+    result = await runAgy();
+  } catch (error) {
+    await remote?.finish().catch(() => undefined);
+    throw error;
   }
+  // Outside the try: a failed workspace restore fails the run.
+  await remote?.finish();
+  return result;
 
   async function runAgy(): Promise<AdapterExecutionResult> {
   // ── Session resume decision ───────────────────────────────────────────────

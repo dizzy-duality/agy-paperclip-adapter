@@ -6,7 +6,7 @@
  * - on a managed home (sandbox pods), point HOME at the per-run runtime root
  *   and install the host's agy login there, so agy needs no state baked into
  *   the image;
- * - deliver the synced skill root;
+ * - deliver the synced skill root into the run's runtime root;
  * - start the Paperclip API bridge when the target asks for one.
  *
  * Only `antigravity-oauth-token` travels. Verified on agy 1.2.14: a run in an
@@ -23,7 +23,6 @@ import {
   describeAdapterExecutionTarget,
   overrideAdapterExecutionTargetRemoteCwd,
   prepareAdapterExecutionTargetRuntime,
-  readAdapterExecutionTargetHomeDir,
   runAdapterExecutionTargetShellCommand,
   startAdapterExecutionTargetPaperclipBridge,
   type AdapterExecutionTarget,
@@ -45,7 +44,7 @@ export interface PreparedAgyRemoteRun {
   /** Directory to pass to agy as `--add-dir` for skills, inside the target. */
   skillsAddDir: string | null;
   bridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>>;
-  /** Stop the bridge and restore the workspace; safe to call once, always. */
+  /** Stop the bridge and restore the workspace; throws if the restore failed. */
   finish: () => Promise<void>;
 }
 
@@ -58,8 +57,8 @@ export async function prepareAgyRemoteRun(input: {
   localCwd: string;
   /** Remote cwd before the workspace sync (the target's default). */
   executionCwd: string;
-  /** Host directory holding the synced skills (`<addDir>/.agents/skills`), if any. */
-  localSkillsHome: string | null;
+  /** Host skill root (the directory holding `.agents/skills`), if any. */
+  localSkillsRoot: string | null;
   env: Record<string, string>;
   timeoutSec: number;
   graceSec: number;
@@ -110,7 +109,7 @@ export async function prepareAgyRemoteRun(input: {
       onRuntimeProgress: input.onRuntimeProgress,
       assets: [
         ...(authStageDir ? [{ key: "auth", localDir: authStageDir }] : []),
-        ...(input.localSkillsHome ? [{ key: "skills", localDir: input.localSkillsHome, followSymlinks: true }] : []),
+        ...(input.localSkillsRoot ? [{ key: "skills", localDir: input.localSkillsRoot, followSymlinks: true }] : []),
       ],
     });
     // The pod now has its copy; the host copy must not linger.
@@ -135,22 +134,10 @@ export async function prepareAgyRemoteRun(input: {
       );
     }
 
-    if (prepared.assetDirs.skills) {
-      const homeDir =
-        managedHomeDir ?? (await readAdapterExecutionTargetHomeDir(runId, target, shellOpts));
-      if (homeDir) {
-        // agy finds skills under <add-dir>/.agents/skills, the same layout the
-        // host uses, so rebuild that layout around the synced asset.
-        skillsAddDir = path.posix.join(homeDir, ".paperclip-agy-skills");
-        const skillsDir = path.posix.join(skillsAddDir, ".agents", "skills");
-        await runAdapterExecutionTargetShellCommand(
-          runId,
-          target,
-          `mkdir -p ${q(path.posix.dirname(skillsDir))} && rm -rf ${q(skillsDir)} && cp -a ${q(prepared.assetDirs.skills)} ${q(skillsDir)}`,
-          shellOpts,
-        );
-      }
-    }
+    // Assets land in this run's own runtime root on the target, so the skill
+    // root's copy can be handed to agy as is: it keeps the .agents/skills
+    // layout agy scans, and concurrent runs never share it.
+    skillsAddDir = prepared.assetDirs.skills ?? null;
 
     const runtimeTarget = overrideAdapterExecutionTargetRemoteCwd(target, executionCwd) ?? null;
     if (adapterExecutionTargetUsesPaperclipBridge(target)) {
@@ -179,7 +166,9 @@ export async function prepareAgyRemoteRun(input: {
       finish: async () => {
         if (finished) return;
         finished = true;
-        await Promise.allSettled([activeBridge?.stop(), activeRestore()]);
+        const [, restored] = await Promise.allSettled([activeBridge?.stop(), activeRestore()]);
+        // A run whose changes never reached the host must not read as success.
+        if (restored.status === "rejected") throw restored.reason;
       },
     };
   } catch (error) {

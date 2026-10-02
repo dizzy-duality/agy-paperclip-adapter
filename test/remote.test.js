@@ -26,20 +26,29 @@ function localRunner() {
         child.stdout.on("data", (d) => (stdout += d));
         child.stderr.on("data", (d) => (stderr += d));
         const timer = timeoutMs ? setTimeout(() => child.kill("SIGKILL"), timeoutMs) : null;
-        child.on("close", (exitCode, signal) => {
+        const done = (exitCode, signal) => {
           if (timer) clearTimeout(timer);
           resolve({ exitCode, signal, timedOut: false, stdout, stderr, pid: child.pid ?? null, startedAt: new Date().toISOString() });
+        };
+        // Like a pod runner: a command that can't start is a failed command,
+        // not a crash (the bridge keeps polling briefly after a run ends).
+        child.on("error", (err) => {
+          stderr += String(err);
+          done(127, null);
         });
+        child.on("close", done);
+        child.stdin.on("error", () => {});
         child.stdin.end(stdin ?? "");
       }),
   };
 }
 
-test("a sandbox run gets the workspace, the login and the skills, and its changes come back", async (t) => {
+function setup(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-remote-"));
   const realHome = process.env.HOME;
   t.after(() => {
     process.env.HOME = realHome;
+    fs.chmodSync(path.join(root, "workspace"), 0o755);
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -82,32 +91,39 @@ cat '${stdoutFile}'
   );
 
   const logs = [];
-  const result = await execute({
-    runId: "run-remote-1",
-    authToken: "run-token-for-test",
-    agent: { id: "agent-1", companyId: "company-1", name: "agy", adapterType: "agy_local", adapterConfig: {} },
-    runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
-    config: {
-      command: agy,
-      cwd: workspace,
-      timeoutSec: 60,
-      graceSec: 1,
-      skillsRootPath: path.join(root, "skill-root"),
-      paperclipRuntimeSkills: [{ key: "local/hello-skill", runtimeName: "hello-skill", source: skillSource }],
-      paperclipSkillSync: { desiredSkills: ["local/hello-skill"] },
-    },
-    context: {},
-    executionTarget: {
-      kind: "remote",
-      transport: "sandbox",
-      providerKey: "kubernetes",
-      remoteCwd: path.join(pod, "workspace"),
-      runner: localRunner(),
-    },
-    onLog: async (_stream, chunk) => {
-      logs.push(chunk);
-    },
-  });
+  const run = () =>
+    execute({
+      runId: "run-remote-1",
+      authToken: "run-token-for-test",
+      agent: { id: "agent-1", companyId: "company-1", name: "agy", adapterType: "agy_local", adapterConfig: {} },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: {
+        command: agy,
+        cwd: workspace,
+        timeoutSec: 60,
+        graceSec: 1,
+        skillsRootPath: path.join(root, "skill-root"),
+        paperclipRuntimeSkills: [{ key: "local/hello-skill", runtimeName: "hello-skill", source: skillSource }],
+        paperclipSkillSync: { desiredSkills: ["local/hello-skill"] },
+      },
+      context: {},
+      executionTarget: {
+        kind: "remote",
+        transport: "sandbox",
+        providerKey: "kubernetes",
+        remoteCwd: path.join(pod, "workspace"),
+        runner: localRunner(),
+      },
+      onLog: async (_stream, chunk) => {
+        logs.push(chunk);
+      },
+    });
+  return { workspace, logs, run };
+}
+
+test("a sandbox run gets the workspace, the login and the skills, and its changes come back", async (t) => {
+  const { workspace, logs, run } = setup(t);
+  const result = await run();
 
   assert.equal(result.errorMessage, null, `run failed: ${result.errorMessage}\n${logs.join("")}`);
   assert.equal(result.exitCode, 0);
@@ -121,4 +137,13 @@ cat '${stdoutFile}'
     [],
     "no staged copy of the login is left on the host",
   );
+});
+
+test("a run whose changes cannot be restored to the host fails", async (t) => {
+  // The pod's change can't land: the host workspace turns read-only mid-run.
+  const { workspace, run } = setup(t);
+  const agy = path.join(path.dirname(workspace), "agy");
+  const line = 'echo "made in pod" > made-in-pod.txt';
+  fs.writeFileSync(agy, fs.readFileSync(agy, "utf8").replace(line, `${line}\nchmod 555 '${workspace}'`));
+  await assert.rejects(run(), /EACCES|permission denied/i, "a lost restore must not read as a successful run");
 });
