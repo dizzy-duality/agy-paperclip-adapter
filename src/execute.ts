@@ -28,6 +28,7 @@ import {
   isPaperclipRuntimeEnvKey,
   parseObject,
   readPaperclipIssueWorkModeFromContext,
+  refreshPaperclipWorkspaceEnvForExecution,
   stringifyPaperclipWakePayload,
 } from "@paperclipai/adapter-utils/server-utils";
 import { buildAdapterEnvConfig } from "@paperclipai/adapter-utils";
@@ -58,6 +59,7 @@ import {
   type AgyParsedStream,
 } from "./parse.js";
 import { buildAgyPrompt } from "./prompt.js";
+import { prepareAgyRemoteRun, type PreparedAgyRemoteRun } from "./remote.js";
 import { sessionCodec } from "./session.js";
 import { describeRunSkillSync, resolveAgySkillRoot, syncSkillsForRun } from "./skills.js";
 
@@ -195,7 +197,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     workspaceSource === "agent_home" && configuredCwd.length > 0;
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
-  const effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
+  let effectiveExecutionCwd = adapterExecutionTargetRemoteCwd(executionTarget, cwd);
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   }
@@ -226,7 +228,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // skills at all has no such directory.
   let skillRoot = resolveAgySkillRoot({ config, agentId: agent.id });
   let skillsAddDir: string | null = null;
-  if (skillRoot.addDir && !executionTargetIsRemote) {
+  if (skillRoot.addDir) {
     try {
       const runSync = await syncSkillsForRun({
         config,
@@ -260,14 +262,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       .stat(skillRoot.skillsHome)
       .then((stats) => stats.isDirectory())
       .catch(() => false);
+    // On a remote target the host path means nothing; the synced skills are
+    // delivered with the runtime assets below and --add-dir points there.
     if (skillsHomeExists) skillsAddDir = skillRoot.addDir;
-  } else if (skillRoot.addDir && executionTargetIsRemote) {
-    // The skill root is a path on the Paperclip host; it does not exist inside
-    // an SSH/sandbox target, so pointing agy at it there would just fail.
+  } else if (executionTargetIsRemote) {
     await onLog(
       "stdout",
-      `[paperclip] Skills synced to ${skillRoot.skillsHome} are not delivered to remote execution targets; ` +
-        `set skillsScope to "global" and provision ~/.gemini/config/skills in the target instead.\n`,
+      `[paperclip] skillsScope "global" skills in ${skillRoot.skillsHome} are not delivered to remote execution targets; ` +
+        `use the default "agent" scope to have them synced.\n`,
     );
   }
 
@@ -289,6 +291,53 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
   applyConfiguredEnv(env, config);
 
+  // ── Remote target: workspace, login, skills, API bridge ───────────────────
+  let remote: PreparedAgyRemoteRun | null = null;
+  if (executionTargetIsRemote) {
+    remote = await prepareAgyRemoteRun({
+      runId,
+      target: executionTarget,
+      localCwd: cwd,
+      executionCwd: effectiveExecutionCwd,
+      localSkillsRoot: skillsAddDir,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog,
+      onRuntimeProgress: ctx.onRuntimeProgress,
+      onExecutionCwd: (executionCwd) => {
+        refreshPaperclipWorkspaceEnvForExecution({
+          env,
+          workspaceCwd: effectiveWorkspaceCwd,
+          workspaceSource,
+          workspaceStrategy: asString(workspaceContext.strategy, ""),
+          workspaceId,
+          workspaceRepoUrl,
+          workspaceRepoRef,
+          workspaceBranch: asString(workspaceContext.branch, ""),
+          workspaceWorktreePath: asString(workspaceContext.worktreePath, ""),
+          agentHome: asString(workspaceContext.agentHome, ""),
+          executionTargetIsRemote,
+          executionCwd,
+        });
+      },
+    });
+    effectiveExecutionCwd = remote.executionCwd;
+    skillsAddDir = remote.skillsAddDir;
+  }
+  const runtimeTarget = remote ? remote.runtimeTarget : executionTarget;
+  let result: AdapterExecutionResult;
+  try {
+    result = await runAgy();
+  } catch (error) {
+    await remote?.finish().catch(() => undefined);
+    throw error;
+  }
+  // Outside the try: a failed workspace restore fails the run.
+  await remote?.finish();
+  return result;
+
+  async function runAgy(): Promise<AdapterExecutionResult> {
   // ── Session resume decision ───────────────────────────────────────────────
   const runtimeSessionParams =
     sessionCodec.deserialize(runtime.sessionParams ?? runtime.sessionId) ?? {};
@@ -304,7 +353,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const canResume =
     storedConversationId.length > 0 &&
     cwdMatches &&
-    adapterExecutionTargetSessionMatches(storedRemoteExecution, executionTarget);
+    adapterExecutionTargetSessionMatches(storedRemoteExecution, runtimeTarget);
   const conversationId = canResume ? storedConversationId : null;
 
   if (storedConversationId.length > 0 && !canResume) {
@@ -417,7 +466,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const cancellation = armProcessCancellation({ signal: cancelSignal, graceSec, onSpawn });
     let proc: Awaited<ReturnType<typeof runAdapterExecutionTargetProcess>>;
     try {
-      proc = await runAdapterExecutionTargetProcess(runId, executionTarget, command, args, {
+      proc = await runAdapterExecutionTargetProcess(runId, runtimeTarget, command, args, {
         cwd,
         env,
         timeoutSec,
@@ -425,6 +474,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         onSpawn: cancellation.onSpawn,
         onLog,
         onRuntimeProgress: ctx.onRuntimeProgress,
+        runLogTail: remote?.bridge?.runLogTail,
+        settleRunDisposition: remote?.bridge?.settleRunDisposition,
         // Under bwrap (--new-session --unshare-pid --die-with-parent) agy sits in
         // its own session, so the Stop kill reaches bwrap's process group, and
         // bwrap's exit takes the whole PID namespace, agy included, with it.
@@ -483,7 +534,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           ...(workspaceRepoUrl ? { repoUrl: workspaceRepoUrl } : {}),
           ...(workspaceRepoRef ? { repoRef: workspaceRepoRef } : {}),
           ...(executionTargetIsRemote
-            ? { remoteExecution: adapterExecutionTargetSessionIdentity(executionTarget) }
+            ? { remoteExecution: adapterExecutionTargetSessionIdentity(runtimeTarget) }
             : {}),
         }
       : null;
@@ -605,6 +656,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   return toResult(initial, false);
+  }
 }
 
 function buildResultJson(
